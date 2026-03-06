@@ -234,6 +234,14 @@ def init_db():
     add_col("eu_despesa_safra", "fornecedor",        "TEXT")
     add_col("fin_lancamento",   "beneficiario",      "TEXT")
     add_col("eu_carga",         "placa",             "TEXT")
+    add_col("eu_carga",         "tipo_carga",        "TEXT")
+    add_col("eu_carga",         "nome_cliente",      "TEXT")
+    add_col("eu_carga",         "codigo_romaneio",   "TEXT")
+    add_col("eu_carga",         "preco_m3",          "REAL")
+    add_col("eu_carga",         "desconto",          "REAL")
+    add_col("eu_carga",         "percentual_recebido","REAL")
+    add_col("eu_carga",         "valor_recebido",    "REAL")
+    add_col("eu_carga",         "valor_total",       "REAL")
     add_col("eu_carga",         "percentual_recebido","REAL")
     add_col("eu_carga",         "desconto",          "REAL")
     add_col("eu_carga",         "valor_recebido",    "REAL")
@@ -659,8 +667,11 @@ def confirm(stdscr, msg, y=10, x=10):
 # ─────────────────────────────────────────────
 # TABELA NAVEGÁVEL
 # ─────────────────────────────────────────────
-def table_view(stdscr, rows, columns, title="", col_widths=None):
-    """Exibe tabela navegável. Retorna índice da linha selecionada ou -1."""
+def table_view(stdscr, rows, columns, title="", col_widths=None, footer=None):
+    """Exibe tabela navegável. Retorna índice da linha selecionada ou -1.
+    Suporta footer customizado e hotkeys especiais:
+      -99 = N (nova), -98 = R (romaneio), -97 = P (recebimento)
+    """
     if not rows:
         flash(stdscr, "Nenhum registro encontrado.")
         return -1
@@ -707,10 +718,9 @@ def table_view(stdscr, rows, columns, title="", col_widths=None):
                 safe_addstr(win, idx + 2, x, val[:cw].ljust(cw), base_attr)
                 x += cw + 2
 
-        # Scroll info
-        safe_addstr(win, win_h - 1, 2,
-                    f"Linha {current+1}/{len(rows)}  ↑↓ navegar  Enter selecionar  Q voltar",
-                    INFO())
+        # Footer
+        footer_text = footer if footer else f"Linha {current+1}/{len(rows)}  ↑↓ navegar  Enter selecionar  Q voltar"
+        safe_addstr(win, win_h - 1, 2, footer_text[:total_w-4], INFO())
         win.refresh()
 
         key = stdscr.getch()
@@ -732,6 +742,12 @@ def table_view(stdscr, rows, columns, title="", col_widths=None):
             offset = min(max(0, len(rows) - visible), offset + visible)
         elif key in (curses.KEY_ENTER, 10, 13):
             return current
+        elif key in (ord('n'), ord('N')):
+            return -99
+        elif key in (ord('r'), ord('R')):
+            return -98
+        elif key in (ord('p'), ord('P')):
+            return -97
         elif key in (ord('q'), ord('Q'), 27):
             return -1
 
@@ -2728,57 +2744,266 @@ def editar_safra(stdscr):
 
 # ── Cargas ───────────────────────────────────────────
 def screen_cargas(stdscr):
+    """Tela principal de cargas: listagem + ações integradas."""
     while True:
-        idx = menu(stdscr, [
-            ("📋", "Listar Cargas"),
-            ("➕", "Nova Carga"),
-            ("📝", "Registrar Romaneio"),
-            ("💰", "Registrar Recebimento"),
-            ("⬅️ ", "Voltar"),
-        ], title=" Cargas ", y_off=3, x_off=4, width=34)
-        if idx == 0: listar_cargas(stdscr)
-        elif idx == 1: nova_carga(stdscr)
-        elif idx == 2: registrar_romaneio(stdscr)
-        elif idx == 3: registrar_recebimento(stdscr)
-        elif idx in (-1, 4): break
+        # Recarrega a cada iteração para refletir alterações
+        conn = get_db()
+        rows = conn.execute("""
+            SELECT c.id, s.codigo as safra, c.placa, c.data_saida,
+                   c.tipo_carga, c.nome_cliente, c.codigo_romaneio,
+                   c.data_romaneio, c.volume_m3, c.data_recebimento,
+                   c.valor_recebido, c.percentual_recebido, c.desconto, c.preco_m3,
+                   c.valor_total, c.id_lancamento, c.observacao, c.status
+            FROM eu_carga c JOIN eu_safra s ON c.id_safra=s.id
+            ORDER BY
+                CASE WHEN c.data_romaneio IS NULL THEN 0 ELSE 1 END,
+                COALESCE(c.data_saida,'9999') DESC
+        """).fetchall()
+        conn.close()
 
-def listar_cargas(stdscr):
+        if not rows:
+            idx = menu(stdscr, [
+                ("➕", "Registrar Saída de Carga"),
+                ("⬅️ ", "Voltar"),
+            ], title=" Cargas de Carvão ", y_off=3, x_off=4, width=34)
+            if idx == 0: _registrar_saida(stdscr)
+            else: break
+            continue
+
+        # Monta tabela: * = sem romaneio
+        def _fmt(v): return f"R${v:,.0f}" if v else ""
+        data = []
+        for r in rows:
+            marker = "*" if not r["data_romaneio"] else " "
+            data.append([
+                marker + str(r["id"]),
+                r["safra"],
+                r["placa"] or "—",
+                r["data_saida"] or "—",
+                f"{r['volume_m3']}m³" if r["volume_m3"] else "",
+                r["codigo_romaneio"] or "",
+                r["data_recebimento"] or "",
+                _fmt(r["valor_recebido"]),
+                f"R${r['preco_m3']:,.2f}/m³" if r["preco_m3"] else "",
+                r["observacao"] or "",
+            ])
+
+        h, w = stdscr.getmaxyx()
+        # Rodapé com ações
+        footer = " N=Nova Saída  R=Romaneio  P=Recebimento  Enter=Editar  Esc=Voltar"
+        idx = table_view(stdscr, data,
+                         ["ID","Safra","Placa","Saída","Volume","Romaneio","Recebimento","Valor","Preço/m³","Obs"],
+                         title=" Cargas de Carvão (* = sem romaneio) ",
+                         col_widths=[6,7,9,12,9,10,14,11,13,14],
+                         footer=footer)
+
+        if idx == -99:   # tecla N
+            _registrar_saida(stdscr)
+        elif idx == -98:  # tecla R
+            _registrar_romaneio(stdscr, rows)
+        elif idx == -97:  # tecla P
+            _registrar_recebimento(stdscr, rows)
+        elif idx >= 0:
+            _editar_carga_inline(stdscr, rows[idx]["id"])
+        else:
+            break
+
+
+def _registrar_saida(stdscr):
+    """Registra a saída de uma nova carga."""
     conn = get_db()
-    rows = conn.execute("""
-        SELECT c.id, s.codigo as safra, c.numero, c.placa, c.data_saida,
-               c.data_romaneio, c.volume_m3, c.valor_total,
-               c.percentual_recebido, c.desconto, c.valor_recebido,
-               c.data_recebimento, c.status, c.observacao,
-               c.id_lancamento
-        FROM eu_carga c JOIN eu_safra s ON c.id_safra=s.id
-        ORDER BY COALESCE(c.data_saida,'9999') DESC
-    """).fetchall()
+    safras = [r["codigo"] for r in conn.execute(
+        "SELECT codigo FROM eu_safra ORDER BY codigo DESC").fetchall()]
     conn.close()
-    if not rows:
+    if not safras:
+        flash(stdscr, "Cadastre uma safra primeiro.", error=True)
+        return
+    fields = [
+        {"label": "Safra",       "required": True, "options": safras},
+        {"label": "Data Saída",  "default": date.today().isoformat(), "required": True},
+        {"label": "Placa",       "required": True},
+        {"label": "Tipo",        "options": ["Carga Cheia", "Carga Parcial"],
+         "default": "Carga Cheia"},
+        {"label": "Obs."},
+    ]
+    result = form(stdscr, fields, title=" Registrar Saída de Carga ", width=52)
+    if result is None:
+        return
+    conn = get_db()
+    try:
+        safra = conn.execute("SELECT id FROM eu_safra WHERE codigo=?",
+                             (result["Safra"],)).fetchone()
+        conn.execute("""INSERT INTO eu_carga
+            (id_safra, data_saida, placa, tipo_carga, observacao, status)
+            VALUES (?,?,?,?,?,?)""",
+            (safra["id"],
+             result["Data Saída"],
+             result["Placa"],
+             result["Tipo"],
+             result["Obs."] or None,
+             "Pendente"))
+        conn.commit()
+        flash(stdscr, f"Saída registrada: {result['Placa']} em {result['Data Saída']}")
+    except Exception as e:
+        flash(stdscr, f"Erro: {e}", error=True)
+    finally:
+        conn.close()
+
+
+def _registrar_romaneio(stdscr, rows):
+    """Registra ou edita romaneio. Sem romaneio aparecem primeiro (*)."""
+    sem = [r for r in rows if not r["data_romaneio"]]
+    com = [r for r in rows if r["data_romaneio"]]
+    opcoes = (
+        [f"* #{r['id']}  {r['placa'] or '—'}  Saída:{r['data_saida'] or '—'}" for r in sem] +
+        [f"  #{r['id']}  {r['placa'] or '—'}  Rom:{r['codigo_romaneio'] or '—'}  {r['volume_m3']}m³" for r in com]
+    )
+    todas = sem + com
+    if not opcoes:
         flash(stdscr, "Nenhuma carga registrada.")
         return
-    def _fmt(v): return f"R$ {v:,.0f}" if v else "—"
-    def _devido(r):
-        if r["valor_total"] and r["percentual_recebido"]:
-            return round(r["valor_total"] * r["percentual_recebido"] / 100, 2)
-        return None
-    data = [[r["id"], r["safra"], r["numero"] or "—",
-             r["placa"] or "—", r["data_saida"] or "—",
-             f"{r['volume_m3']} m³" if r["volume_m3"] else "—",
-             _fmt(r["valor_total"]),
-             _fmt(_devido(r)),
-             _fmt(r["desconto"]),
-             _fmt(r["valor_recebido"]),
-             r["status"]] for r in rows]
-    idx = table_view(stdscr, data,
-                     ["ID","Safra","Nº","Placa","Saída","Vol","Total","Devido","Desc.","Recebido","Status"],
-                     title=" Cargas de Carvão ", col_widths=[5,7,5,9,12,9,12,12,10,12,10])
-    if idx >= 0:
-        _editar_carga_inline(stdscr, rows[idx]["id"])
-        return  # re-enter will reload list
+    idx = option_picker(stdscr, opcoes, "Selecionar Carga — * sem romaneio", 4, 4)
+    if idx is None:
+        return
+    carga = todas[idx]
+    fields = [
+        {"label": "Nome do Cliente",    "required": True,
+         "default": carga["nome_cliente"] or ""},
+        {"label": "Código do Romaneio", "required": True,
+         "default": carga["codigo_romaneio"] or ""},
+        {"label": "Data Romaneio",      "default": carga["data_romaneio"] or date.today().isoformat()},
+        {"label": "Volume (m³)",        "required": True,
+         "default": str(carga["volume_m3"]) if carga["volume_m3"] else ""},
+    ]
+    result = form(stdscr, fields,
+                  title=f" Romaneio — Carga #{carga['id']} {carga['placa'] or ''} ",
+                  width=56)
+    if result is None:
+        return
+    try:
+        vol = float(result["Volume (m³)"].replace(",", "."))
+    except ValueError:
+        flash(stdscr, "Volume inválido.", error=True)
+        return
+    conn = get_db()
+    conn.execute("""UPDATE eu_carga SET
+        nome_cliente=?, codigo_romaneio=?, data_romaneio=?, volume_m3=?,
+        status=CASE WHEN status='Pendente' THEN 'Romaneio' ELSE status END
+        WHERE id=?""",
+        (result["Nome do Cliente"],
+         result["Código do Romaneio"],
+         result["Data Romaneio"] or date.today().isoformat(),
+         vol, carga["id"]))
+    conn.commit()
+    conn.close()
+    flash(stdscr, f"Romaneio #{result['Código do Romaneio']} registrado: {vol} m³")
+
+
+def _registrar_recebimento(stdscr, rows):
+    """Registra ou edita recebimento de uma carga."""
+    sem = [r for r in rows if not r["data_recebimento"] and r["data_romaneio"]]
+    com = [r for r in rows if r["data_recebimento"]]
+    if not sem and not com:
+        flash(stdscr, "Nenhuma carga com romaneio disponível.")
+        return
+    opcoes = (
+        [f"* #{r['id']}  {r['placa'] or '—'}  {r['volume_m3']}m³  Rom:{r['codigo_romaneio'] or '—'}" for r in sem] +
+        [f"  #{r['id']}  {r['placa'] or '—'}  {r['volume_m3']}m³  R${r['valor_recebido']:,.0f}" for r in com]
+    )
+    todas = sem + com
+    idx = option_picker(stdscr, opcoes, "Selecionar Carga — * sem recebimento", 4, 4)
+    if idx is None:
+        return
+    carga = todas[idx]
+    conn = get_db()
+    contas = [r["nome"] for r in conn.execute(
+        "SELECT nome FROM fin_conta WHERE ativa=1 ORDER BY nome").fetchall()]
+    conta_atual = ""
+    if carga["id_lancamento"]:
+        row = conn.execute("""SELECT c.nome FROM fin_conta c
+            JOIN fin_lancamento l ON l.id_conta=c.id
+            WHERE l.id=?""", (carga["id_lancamento"],)).fetchone()
+        if row: conta_atual = row["nome"]
+    conn.close()
+
+    fields = [
+        {"label": "Data Recebimento",    "required": True,
+         "default": carga["data_recebimento"] or date.today().isoformat()},
+        {"label": "Valor Recebido (R$)", "required": True,
+         "default": str(carga["valor_recebido"]) if carga["valor_recebido"] else ""},
+        {"label": "% Acordado",          "required": True,
+         "default": str(carga["percentual_recebido"]) if carga["percentual_recebido"] else ""},
+        {"label": "Desconto (R$)",
+         "default": str(carga["desconto"]) if carga["desconto"] else ""},
+        {"label": "Conta",               "options": contas,
+         "default": conta_atual or (contas[0] if contas else ""), "required": True},
+        {"label": "Obs."},
+    ]
+    result = form(stdscr, fields,
+                  title=f" Recebimento — Carga #{carga['id']} {carga['volume_m3']}m³ ",
+                  width=56)
+    if result is None:
+        return
+    try:
+        valor_rec = float(result["Valor Recebido (R$)"].replace(",", "."))
+        pct       = float(result["% Acordado"].replace(",", "."))
+        desc_s    = result["Desconto (R$)"].replace(",", ".")
+        desconto  = float(desc_s) if desc_s else None
+        vol       = carga["volume_m3"] or 0
+        # valor_total = valor bruto a 100% (não afetado pelo desconto)
+        valor_total = round(valor_rec / (pct / 100), 2) if pct else valor_rec
+        # preco_m3 baseado no valor_total bruto
+        preco_m3  = round(valor_total / vol, 2) if vol else None
+        # valor que vai para o lançamento = valor_rec - desconto
+        valor_lanc = round(valor_rec - (desconto or 0), 2)
+    except (ValueError, ZeroDivisionError):
+        flash(stdscr, "Valor ou percentual inválido.", error=True)
+        return
+
+    conn = get_db()
+    id_conta = conn.execute("SELECT id FROM fin_conta WHERE nome=?",
+                            (result["Conta"],)).fetchone()
+
+    if carga["id_lancamento"]:
+        # Atualiza lançamento existente com valor líquido
+        conn.execute("""UPDATE fin_lancamento SET valor=?, data=?, id_conta=?
+            WHERE id=?""",
+            (valor_lanc,
+             result["Data Recebimento"],
+             id_conta["id"] if id_conta else None,
+             carga["id_lancamento"]))
+        lid = carga["id_lancamento"]
+    else:
+        # Cria novo lançamento com valor líquido
+        lid = criar_lancamento(
+            conn, tipo="Receita", valor=valor_lanc,
+            descricao=f"Carvão — Carga #{carga['id']} Rom:{carga['codigo_romaneio'] or '—'} {vol}m³",
+            categoria="Eucalipto",
+            id_conta=id_conta["id"] if id_conta else None,
+            data=result["Data Recebimento"],
+            status="Realizado",
+            origem="eu_carga", id_origem=carga["id"],
+        )
+
+    conn.execute("""UPDATE eu_carga SET
+        valor_recebido=?, percentual_recebido=?, desconto=?,
+        valor_total=?, preco_m3=?,
+        data_recebimento=?, id_conta=?, id_lancamento=?, status='Recebida'
+        WHERE id=?""",
+        (valor_rec, pct, desconto, valor_total, preco_m3,
+         result["Data Recebimento"],
+         id_conta["id"] if id_conta else None,
+         lid, carga["id"]))
+    conn.commit()
+    conn.close()
+    desc_txt = f" − R${desconto:,.2f} desc." if desconto else ""
+    flash(stdscr,
+          f"Recebido R${valor_rec:,.2f} ({pct}%){desc_txt} → Líq. R${valor_lanc:,.2f}"
+          f" | Total bruto R${valor_total:,.2f} | R${preco_m3:,.2f}/m³ | Lanç.#{lid}")
+
 
 def _editar_carga_inline(stdscr, carga_id):
-    """Abre formulário de edição para uma carga. Inclui botão Apagar."""
+    """Edita qualquer campo de uma carga. Inclui botão Apagar."""
     conn = get_db()
     c = conn.execute("""
         SELECT c.*, s.codigo as safra_codigo
@@ -2795,120 +3020,129 @@ def _editar_carga_inline(stdscr, carga_id):
         return
 
     # Compatibilidade com bancos antigos
-    try:  vr   = c["valor_recebido"]
-    except IndexError: vr = None
-    try:  desc = c["desconto"]
-    except IndexError: desc = None
-    try:  pct  = c["percentual_recebido"]
-    except IndexError: pct = None
+    def _safe(key, default=None):
+        try: return c[key]
+        except IndexError: return default
 
-    pct_atual = f"{pct:.1f}" if pct else ""
+    conta_nome = ""
+    if _safe("id_conta"):
+        conn2 = get_db()
+        row = conn2.execute("SELECT nome FROM fin_conta WHERE id=?",
+                            (_safe("id_conta"),)).fetchone()
+        conn2.close()
+        if row: conta_nome = row["nome"]
 
     fields = [
-        {"label": "Safra",              "options": safras, "default": c["safra_codigo"]},
-        {"label": "Número",             "default": c["numero"]        or ""},
-        {"label": "Placa",              "default": c["placa"]         or ""},
-        {"label": "Status",             "options": ["Pendente","Romaneio","Recebida"],
-         "default": c["status"]},
-        {"label": "Data Saída",         "default": c["data_saida"]    or ""},
-        {"label": "Data Romaneio",      "default": c["data_romaneio"] or ""},
-        {"label": "Volume (m³)",        "default": str(c["volume_m3"])    if c["volume_m3"]     else ""},
-        {"label": "Valor Total (R$)",   "default": str(c["valor_total"])  if c["valor_total"]   else ""},
-        {"label": "% Recebido",         "default": pct_atual},
-        {"label": "Desconto (R$)",       "default": str(desc) if desc else ""},
-        {"label": "Valor Recebido (R$)", "default": str(vr) if vr else ""},
-        {"label": "Data Recebimento",   "default": c["data_recebimento"] or ""},
-        {"label": "Conta",              "options": [""] + contas,
-         "default": c["id_conta"] and next(
-             (r for r in contas if True), "") or ""},
-        {"label": "Obs.",               "default": c["observacao"]    or ""},
-        {"label": "⚠ APAGAR CARGA",    "options": ["Não","Sim — apagar"], "default": "Não"},
+        # ── Saída ──
+        {"label": "Safra",           "options": safras,
+         "default": c["safra_codigo"]},
+        {"label": "Data Saída",      "default": _safe("data_saida") or ""},
+        {"label": "Placa",           "default": _safe("placa") or ""},
+        {"label": "Tipo",            "options": ["Carga Cheia","Carga Parcial"],
+         "default": _safe("tipo_carga") or "Carga Cheia"},
+        # ── Romaneio ──
+        {"label": "Nome Cliente",    "default": _safe("nome_cliente") or ""},
+        {"label": "Cód. Romaneio",   "default": _safe("codigo_romaneio") or ""},
+        {"label": "Data Romaneio",   "default": _safe("data_romaneio") or ""},
+        {"label": "Volume (m³)",     "default": str(_safe("volume_m3")) if _safe("volume_m3") else ""},
+        # ── Recebimento ──
+        {"label": "Data Recebimento","default": _safe("data_recebimento") or ""},
+        {"label": "Valor Recebido",  "default": str(_safe("valor_recebido")) if _safe("valor_recebido") else ""},
+        {"label": "% Acordado",      "default": str(_safe("percentual_recebido")) if _safe("percentual_recebido") else ""},
+        {"label": "Desconto (R$)",   "default": str(_safe("desconto")) if _safe("desconto") else ""},
+        {"label": "Conta",           "options": [""] + contas, "default": conta_nome},
+        {"label": "Obs.",            "default": _safe("observacao") or ""},
+        {"label": "⚠ APAGAR",        "options": ["Não","Sim — apagar"], "default": "Não"},
     ]
-    # Pre-fill conta name
-    if c["id_conta"]:
-        conn2 = get_db()
-        row = conn2.execute("SELECT nome FROM fin_conta WHERE id=?", (c["id_conta"],)).fetchone()
-        conn2.close()
-        if row:
-            fields[12]["default"] = row["nome"]
-
-    result = form(stdscr, fields, title=f" Carga #{carga_id} — Editar ", width=56)
+    result = form(stdscr, fields, title=f" Editar Carga #{carga_id} ", width=58)
     if result is None:
         return
 
-    # ── Apagar ───────────────────────────────────────────────────
-    if result["⚠ APAGAR CARGA"] == "Sim — apagar":
+    # Apagar
+    if result["⚠ APAGAR"] == "Sim — apagar":
         h, w = stdscr.getmaxyx()
-        aviso = " (lançamento financeiro também será apagado)" if c["id_lancamento"] else ""
-        if not confirm(stdscr, f"Apagar carga #{carga_id}?{aviso}", h//2, max(2, w//2-24)):
+        lid = _safe("id_lancamento")
+        aviso = " + lançamento financeiro" if lid else ""
+        if not confirm(stdscr, f"Apagar carga #{carga_id}{aviso}?",
+                       h//2, max(2, w//2-20)):
             return
         conn = get_db()
-        if c["id_lancamento"]:
-            conn.execute("DELETE FROM fin_lancamento WHERE id=?", (c["id_lancamento"],))
+        if lid:
+            conn.execute("DELETE FROM fin_lancamento WHERE id=?", (lid,))
         conn.execute("DELETE FROM eu_carga WHERE id=?", (carga_id,))
         conn.commit()
         conn.close()
-        flash(stdscr, f"Carga #{carga_id} apagada." +
-              (" Lançamento removido." if c["id_lancamento"] else ""))
+        flash(stdscr, f"Carga #{carga_id} apagada.")
         return
 
-    # ── Salvar edição ────────────────────────────────────────────
+    # Salvar
     conn = get_db()
     try:
         safra = conn.execute("SELECT id FROM eu_safra WHERE codigo=?",
                              (result["Safra"],)).fetchone()
         id_conta = conn.execute("SELECT id FROM fin_conta WHERE nome=?",
                                 (result["Conta"],)).fetchone() if result["Conta"] else None
-        vol   = float(result["Volume (m³)"].replace(",","."))       if result["Volume (m³)"]      else None
-        valor = float(result["Valor Total (R$)"].replace(",",".")) if result["Valor Total (R$)"]  else None
-        pct_s  = result["% Recebido"].replace(",",".")
-        desc_s = result["Desconto (R$)"].replace(",",".")
-        vr_s   = result["Valor Recebido (R$)"].replace(",",".")
-        pct_v    = float(pct_s)  if pct_s  else None
-        desconto = float(desc_s) if desc_s else None
-        # valor_recebido = total * pct/100 - desconto
-        if vr_s:
-            valor_rec = float(vr_s)  # campo direto tem prioridade
-        elif pct_v and valor:
-            base = round(valor * pct_v / 100, 2)
-            valor_rec = round(base - (desconto or 0), 2)
+        vol_s   = result["Volume (m³)"].replace(",",".")
+        vr_s    = result["Valor Recebido"].replace(",",".")
+        pct_s   = result["% Acordado"].replace(",",".")
+        desc_s  = result["Desconto (R$)"].replace(",",".")
+        vol       = float(vol_s)  if vol_s  else None
+        valor_rec = float(vr_s)   if vr_s   else None
+        pct       = float(pct_s)  if pct_s  else None
+        desconto  = float(desc_s) if desc_s else None
+
+        # valor_total e preco_m3: baseados no valor bruto (sem desconto)
+        if valor_rec and pct:
+            valor_total = round(valor_rec / (pct / 100), 2)
+            preco_m3    = round(valor_total / vol, 2) if vol else None
         else:
-            valor_rec = None
+            valor_total = _safe("valor_total")
+            preco_m3    = _safe("preco_m3")
+        # Valor que vai para o lançamento = valor_rec - desconto
+        valor_lanc = round(valor_rec - (desconto or 0), 2) if valor_rec else None
+
+        # Determina status
+        if result["Data Recebimento"]:
+            status = "Recebida"
+        elif result["Data Romaneio"]:
+            status = "Romaneio"
+        else:
+            status = "Pendente"
 
         conn.execute("""UPDATE eu_carga SET
-            id_safra=?, numero=?, placa=?, status=?,
-            data_saida=?, data_romaneio=?, volume_m3=?, valor_total=?,
-            percentual_recebido=?, desconto=?, valor_recebido=?,
-            data_recebimento=?, id_conta=?, observacao=?
+            id_safra=?, data_saida=?, placa=?, tipo_carga=?,
+            nome_cliente=?, codigo_romaneio=?, data_romaneio=?, volume_m3=?,
+            data_recebimento=?, valor_recebido=?, percentual_recebido=?,
+            desconto=?, valor_total=?, preco_m3=?, id_conta=?, observacao=?, status=?
             WHERE id=?""",
             (safra["id"] if safra else c["id_safra"],
-             result["Número"]  or None,
-             result["Placa"]   or None,
-             result["Status"],
-             result["Data Saída"]        or None,
-             result["Data Romaneio"]     or None,
-             vol, valor, pct_v, desconto, valor_rec,
-             result["Data Recebimento"]  or None,
+             result["Data Saída"] or None,
+             result["Placa"] or None,
+             result["Tipo"],
+             result["Nome Cliente"] or None,
+             result["Cód. Romaneio"] or None,
+             result["Data Romaneio"] or None,
+             vol,
+             result["Data Recebimento"] or None,
+             valor_rec, pct, desconto, valor_total, preco_m3,
              id_conta["id"] if id_conta else None,
              result["Obs."] or None,
+             status,
              carga_id))
 
-        valor_lanc = valor_rec if valor_rec is not None else valor
-        if c["id_lancamento"] and valor_lanc:
-            # Atualiza lançamento existente
-            conn.execute("UPDATE fin_lancamento SET valor=?, data=?, id_conta=? WHERE id=?",
-                         (valor_lanc,
-                          result["Data Recebimento"] or None,
-                          id_conta["id"] if id_conta else None,
-                          c["id_lancamento"]))
-        elif (not c["id_lancamento"]
-              and result["Status"] == "Recebida"
-              and valor_lanc
-              and id_conta):
-            # Cria lançamento se status mudou para Recebida e tem conta
+        # Sync lançamento — usa valor_lanc (valor_rec - desconto)
+        lid = _safe("id_lancamento")
+        if lid and valor_lanc:
+            conn.execute("""UPDATE fin_lancamento SET valor=?, data=?, id_conta=?
+                WHERE id=?""",
+                (valor_lanc,
+                 result["Data Recebimento"] or None,
+                 id_conta["id"] if id_conta else None,
+                 lid))
+        elif not lid and status == "Recebida" and valor_lanc and id_conta:
             lid = criar_lancamento(
                 conn, tipo="Receita", valor=valor_lanc,
-                descricao=f"Carvão — Carga #{carga_id} Safra {result['Safra']}",
+                descricao=f"Carvão — Carga #{carga_id} Rom:{result['Cód. Romaneio'] or '—'}",
                 categoria="Eucalipto",
                 id_conta=id_conta["id"],
                 data=result["Data Recebimento"] or date.today().isoformat(),
@@ -2919,152 +3153,12 @@ def _editar_carga_inline(stdscr, carga_id):
                          (lid, carga_id))
 
         conn.commit()
-        msg = f"Carga #{carga_id} atualizada."
-        if not c["id_lancamento"] and result["Status"] == "Recebida" and valor_lanc and id_conta:
-            msg += f" Lançamento criado automaticamente."
-        flash(stdscr, msg)
-    except ValueError:
-        flash(stdscr, "Volume ou valor inválido.", error=True)
+        flash(stdscr, f"Carga #{carga_id} atualizada.")
+    except (ValueError, ZeroDivisionError) as e:
+        flash(stdscr, f"Erro: {e}", error=True)
     finally:
         conn.close()
 
-
-def nova_carga(stdscr):
-    conn = get_db()
-    safras = [r["codigo"] for r in conn.execute(
-        "SELECT codigo FROM eu_safra ORDER BY codigo DESC").fetchall()]
-    conn.close()
-    if not safras:
-        flash(stdscr, "Cadastre uma safra primeiro.", error=True)
-        return
-    fields = [
-        {"label": "Safra",       "required": True, "options": safras},
-        {"label": "Número"},
-        {"label": "Placa"},
-        {"label": "Data Saída",  "default": date.today().isoformat()},
-        {"label": "Volume (m³)", "default": ""},
-        {"label": "Obs."},
-    ]
-    result = form(stdscr, fields, title=" Nova Carga de Carvão ", width=52)
-    if result is None:
-        return
-    conn = get_db()
-    try:
-        vol = float(result["Volume (m³)"].replace(",",".")) if result["Volume (m³)"] else None
-        safra = conn.execute("SELECT id FROM eu_safra WHERE codigo=?", (result["Safra"],)).fetchone()
-        conn.execute("""INSERT INTO eu_carga
-            (id_safra, numero, placa, data_saida, volume_m3, observacao, status)
-            VALUES (?,?,?,?,?,?,?)""",
-            (safra["id"], result["Número"] or None,
-             result["Placa"] or None,
-             result["Data Saída"] or date.today().isoformat(),
-             vol, result["Obs."] or None, "Pendente"))
-        conn.commit()
-        flash(stdscr, "Carga registrada!")
-    except ValueError:
-        flash(stdscr, "Volume inválido.", error=True)
-    finally:
-        conn.close()
-
-def registrar_romaneio(stdscr):
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT c.id, s.codigo, c.numero, c.placa, c.status FROM eu_carga c
-        JOIN eu_safra s ON c.id_safra=s.id
-        WHERE c.status = 'Pendente' ORDER BY c.id DESC
-    """).fetchall()
-    conn.close()
-    if not rows:
-        flash(stdscr, "Nenhuma carga Pendente aguardando romaneio.")
-        return
-    opcoes = [f"#{r['id']} Safra:{r['codigo']} Nº:{r['numero'] or '—'} Placa:{r['placa'] or '—'}" for r in rows]
-    idx = option_picker(stdscr, opcoes, "Selecionar Carga", 5, 5)
-    if idx is None:
-        return
-    carga = rows[idx]
-    fields = [
-        {"label": "Data Romaneio", "default": date.today().isoformat()},
-        {"label": "Volume (m³)",   "required": True},
-        {"label": "Valor por m³",  "required": True},
-    ]
-    result = form(stdscr, fields, title=f" Romaneio Carga #{carga['id']} ", width=52)
-    if result is None:
-        return
-    try:
-        vol = float(result["Volume (m³)"])
-        vunit = float(result["Valor por m³"])
-        vtotal = vol * vunit
-        conn = get_db()
-        conn.execute("""UPDATE eu_carga SET data_romaneio=?, volume_m3=?, valor_unitario=?,
-            valor_total=?, status='Romaneio' WHERE id=?""",
-            (result["Data Romaneio"], vol, vunit, vtotal, carga["id"]))
-        conn.commit()
-        conn.close()
-        flash(stdscr, f"Romaneio: {vol} m³ × R$ {vunit:.2f} = R$ {vtotal:,.2f}")
-    except ValueError:
-        flash(stdscr, "Volume ou valor inválido.", error=True)
-
-def registrar_recebimento(stdscr):
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT c.id, s.codigo, c.numero, c.placa, c.volume_m3, c.valor_total, c.valor_recebido FROM eu_carga c
-        JOIN eu_safra s ON c.id_safra=s.id
-        WHERE c.status='Romaneio' AND c.data_recebimento IS NULL
-        ORDER BY c.id DESC
-    """).fetchall()
-    conn.close()
-    if not rows:
-        flash(stdscr, "Nenhuma carga aguardando recebimento.")
-        return
-    opcoes = [f"#{r['id']} Safra:{r['codigo']} Placa:{r['placa'] or '—'} {r['volume_m3'] or '?'}m³  R${r['valor_total']:,.0f}" for r in rows]
-    idx = option_picker(stdscr, opcoes, "Selecionar Carga", 5, 5)
-    if idx is None:
-        return
-    carga = rows[idx]
-    conn = get_db()
-    contas = [r["nome"] for r in conn.execute(
-        "SELECT nome FROM fin_conta WHERE ativa=1 ORDER BY nome").fetchall()]
-    conn.close()
-    val_hint = f"R$ {carga['valor_total']:,.2f}" if carga["valor_total"] else ""
-    fields = [
-        {"label": "Data Recebimento", "default": date.today().isoformat()},
-        {"label": "Valor Recebido",   "required": True,
-         "default": str(carga["valor_recebido"]) if carga["valor_recebido"]
-                    else str(carga["valor_total"]) if carga["valor_total"] else ""},
-        {"label": "Conta",            "options": contas, "default": contas[0] if contas else "",
-         "required": True},
-        {"label": "Beneficiário",     "default": ""},
-        {"label": "Obs."},
-    ]
-    result = form(stdscr, fields, title=f" Recebimento Carga #{carga['id']} ", width=54)
-    if result is None:
-        return
-    try:
-        valor_rec = float(result["Valor Recebido"].replace(",","."))
-    except ValueError:
-        flash(stdscr, "Valor inválido.", error=True)
-        return
-    conn = get_db()
-    id_conta = conn.execute("SELECT id FROM fin_conta WHERE nome=?", (result["Conta"],)).fetchone()
-    lid = criar_lancamento(
-        conn, tipo="Receita", valor=valor_rec,
-        descricao=f"Carvão — Carga #{carga['id']} Safra {carga['codigo']}",
-        categoria="Eucalipto",
-        beneficiario=result["Beneficiário"] or None,
-        id_conta=id_conta["id"] if id_conta else None,
-        data=result["Data Recebimento"],
-        status="Realizado",
-        origem="eu_carga", id_origem=carga["id"],
-    )
-    conn.execute("""UPDATE eu_carga SET data_recebimento=?, valor_recebido=?,
-        id_conta=?, id_lancamento=?, status='Recebida' WHERE id=?""",
-        (result["Data Recebimento"], valor_rec,
-         id_conta["id"] if id_conta else None, lid, carga["id"]))
-    conn.commit()
-    conn.close()
-    flash(stdscr, f"Recebimento R$ {valor_rec:,.2f} registrado. Lançamento #{lid} criado.")
-
-# ── Despesas de Safra ────────────────────────────────
 def screen_despesas_safra(stdscr):
     while True:
         idx = menu(stdscr, [
