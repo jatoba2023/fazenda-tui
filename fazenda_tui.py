@@ -5,10 +5,12 @@ Interface de menus navegáveis por teclado
 Módulos: Gado · Eucalipto · Financeiro · Equipamentos
 """
 
+import sys
+if sys.platform == "win32":
+    import windows_curses  # pip install windows-curses
 import curses
 import sqlite3
 import os
-import sys
 from datetime import date, datetime
 
 # ─────────────────────────────────────────────
